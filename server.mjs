@@ -1889,7 +1889,7 @@ async function buildHealthKundli(userId = "demo", req) {
   const provider = await fetchExternalAstrology(profile);
   const chart = localizeHealthChart(localHealthChart(profile), profile.language);
   const analysis = analyzeHealthKundli(profile, chart, dashboard);
-  const host = req?.headers?.host || `localhost:${PORT}`;
+  const origin = requestOrigin(req);
   return {
     schemaVersion: contractVersions.healthKundli,
     generatedAt: new Date().toISOString(),
@@ -1910,7 +1910,7 @@ async function buildHealthKundli(userId = "demo", req) {
     chart,
     analysis,
     chartId: chart.chartId,
-    svgUrl: `http://${host}/api/health-kundli.svg?userId=${encodeURIComponent(profile.id)}&chartId=${encodeURIComponent(chart.chartId)}`,
+    svgUrl: `${origin}/api/health-kundli.svg?userId=${encodeURIComponent(profile.id)}&chartId=${encodeURIComponent(chart.chartId)}`,
     disclaimers: [localizeDisclaimer("global", profile.language), localizeDisclaimer("report", profile.language)]
   };
 }
@@ -2462,8 +2462,15 @@ function apiConfig(language = "English") {
   };
 }
 
+function requestOrigin(req) {
+  const host = req?.headers?.host || `localhost:${PORT}`;
+  const forwardedProto = req?.headers?.["x-forwarded-proto"];
+  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  return `${proto || "http"}://${host}`;
+}
+
 function embedManifest(req) {
-  const origin = `http://${req.headers.host || `localhost:${PORT}`}`;
+  const origin = requestOrigin(req);
   return {
     version: "0.1.0",
     script: `${origin}/embed.js`,
@@ -2721,13 +2728,15 @@ async function serveStatic(req, res, url) {
 
 export async function handleRequest(req, res) {
   try {
-    const url = new URL(req.url || "/", `http://${req.headers.host || `localhost:${PORT}`}`);
+    const url = new URL(req.url || "/", requestOrigin(req));
     if (url.pathname.startsWith("/api/")) return handleApi(req, res, url);
     return serveStatic(req, res, url);
   } catch (error) {
     return json(res, 500, { error: "server_error", message: error.message });
   }
 }
+
+export default handleRequest;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = createServer(handleRequest);
