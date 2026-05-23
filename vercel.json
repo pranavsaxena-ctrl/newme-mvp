@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/[...path].mjs": {
+      "runtime": "nodejs22.x"
+    }
+  }
+}
