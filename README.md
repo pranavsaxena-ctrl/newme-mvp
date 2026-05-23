@@ -10,6 +10,22 @@ node server.mjs
 
 Open `http://localhost:4174`.
 
+## Prokerala Astrology API
+
+Health Kundli supports Prokerala through server-side OAuth client credentials. Set these environment variables on the server or in Vercel, never in browser code:
+
+```bash
+ASTROLOGY_PROVIDER=Prokerala
+PROKERALA_CLIENT_ID=your-client-id
+PROKERALA_CLIENT_SECRET=your-client-secret
+PROKERALA_CLIENT_TYPE=Web Application
+PROKERALA_API_BASE_URL=https://api.prokerala.com/v2
+PROKERALA_TOKEN_URL=https://api.prokerala.com/token
+PROKERALA_AYANAMSA=1
+```
+
+The public app and embed APIs expose only provider status, requested birth parameters, Kundli output, SVG chart image, and health analysis. They do not expose the client secret.
+
 ## What Is Included
 
 - Mobile PWA shell with PharmEasy-inspired teal, mint, saffron, and clinical white palette.

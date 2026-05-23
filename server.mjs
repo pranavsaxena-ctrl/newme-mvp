@@ -14,17 +14,41 @@ const nudgeRatings = [];
 const nudgeCompletions = new Map();
 const notificationPreferences = new Map();
 
-const astrologyProvider = {
-  name: process.env.ASTROLOGY_PROVIDER || "KundliAPI",
-  baseUrl: process.env.KUNDLI_API_BASE_URL || "https://kundliapi.com",
-  apiKey: process.env.KUNDLI_API_KEY || "",
-  endpoints: {
-    lagnaChart: process.env.KUNDLI_LAGNA_CHART_ENDPOINT || "/api/charts/lagna_chart",
-    planetPositions: process.env.KUNDLI_PLANETS_ENDPOINT || "/api/planets/all",
-    mahaDasha: process.env.KUNDLI_DASHA_ENDPOINT || "/api/dasha/maha_dasha",
-    sadeSati: process.env.KUNDLI_SADHESATI_ENDPOINT || "/api/dosha/sadhesati"
-  }
+const configuredAstrologyProvider = process.env.ASTROLOGY_PROVIDER || "Prokerala";
+const astrologyProviderKind = /kundliapi|api-key|legacy/i.test(configuredAstrologyProvider)
+  ? "api-key"
+  : "prokerala";
+const prokeralaEndpoints = {
+  kundli: process.env.PROKERALA_KUNDLI_ENDPOINT || "/astrology/kundli",
+  advancedKundli: process.env.PROKERALA_ADVANCED_KUNDLI_ENDPOINT || "/astrology/kundli/advanced",
+  birthChart: process.env.PROKERALA_CHART_ENDPOINT || "/astrology/chart",
+  planetPositions: process.env.PROKERALA_PLANETS_ENDPOINT || "/astrology/planet-position",
+  mahaDasha: process.env.PROKERALA_DASHA_ENDPOINT || "/astrology/dasha-periods",
+  sadeSati: process.env.PROKERALA_SADHESATI_ENDPOINT || "/astrology/sade-sati",
+  mangalDosha: process.env.PROKERALA_MANGAL_DOSHA_ENDPOINT || "/astrology/mangal-dosha"
 };
+const legacyKundliEndpoints = {
+  lagnaChart: process.env.KUNDLI_LAGNA_CHART_ENDPOINT || "/api/charts/lagna_chart",
+  planetPositions: process.env.KUNDLI_PLANETS_ENDPOINT || "/api/planets/all",
+  mahaDasha: process.env.KUNDLI_DASHA_ENDPOINT || "/api/dasha/maha_dasha",
+  sadeSati: process.env.KUNDLI_SADHESATI_ENDPOINT || "/api/dosha/sadhesati"
+};
+const astrologyProvider = {
+  name: configuredAstrologyProvider,
+  kind: astrologyProviderKind,
+  baseUrl: astrologyProviderKind === "prokerala"
+    ? (process.env.PROKERALA_API_BASE_URL || "https://api.prokerala.com/v2")
+    : (process.env.KUNDLI_API_BASE_URL || "https://kundliapi.com"),
+  tokenUrl: process.env.PROKERALA_TOKEN_URL || "https://api.prokerala.com/token",
+  clientId: process.env.PROKERALA_CLIENT_ID || "",
+  clientSecret: process.env.PROKERALA_CLIENT_SECRET || "",
+  clientType: process.env.PROKERALA_CLIENT_TYPE || "Web Application",
+  apiKey: process.env.KUNDLI_API_KEY || "",
+  ayanamsa: process.env.PROKERALA_AYANAMSA || "",
+  endpoints: astrologyProviderKind === "prokerala" ? prokeralaEndpoints : legacyKundliEndpoints,
+  legacyEndpoints: legacyKundliEndpoints
+};
+let prokeralaTokenCache = { accessToken: "", expiresAt: 0 };
 
 const contractVersions = Object.freeze({
   api: "0.4.0-sprint4",
@@ -1621,6 +1645,7 @@ function providerBirthPayload(profile) {
   const [year, month, day] = String(profile.birthDate).split("-").map(Number);
   const [hour, min] = String(profile.birthTime).split(":").map(Number);
   const place = knownPlaces[String(profile.birthPlace || "").trim().toLowerCase()] || knownPlaces["varanasi, india"];
+  const tzone = timezoneOffsetHours(profile.timezone, profile.birthDate, profile.birthTime) ?? place.tzone;
   return {
     day,
     month,
@@ -1629,11 +1654,181 @@ function providerBirthPayload(profile) {
     min,
     lat: place.lat,
     lon: place.lon,
-    tzone: place.tzone
+    tzone,
+    timezone: profile.timezone || defaultProfile.timezone
   };
 }
 
-async function callAstrologyEndpoint(endpoint, payload) {
+function timezoneOffsetHours(timezone, birthDate, birthTime) {
+  if (!timezone || !birthDate || !birthTime) return null;
+  try {
+    const [year, month, day] = String(birthDate).split("-").map(Number);
+    const [hour, minute] = String(birthTime).split(":").map(Number);
+    if (![year, month, day, hour, minute].every(Number.isFinite)) return null;
+    const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(new Date(utcGuess));
+    const value = (type) => Number(parts.find((part) => part.type === type)?.value);
+    const zonedAsUtc = Date.UTC(value("year"), value("month") - 1, value("day"), value("hour"), value("minute"), value("second"));
+    return (zonedAsUtc - utcGuess) / 3600000;
+  } catch {
+    return null;
+  }
+}
+
+function offsetLabelFromHours(hours = 0) {
+  const sign = hours >= 0 ? "+" : "-";
+  const absolute = Math.abs(hours);
+  const wholeHours = Math.floor(absolute);
+  const minutes = Math.round((absolute - wholeHours) * 60);
+  return `${sign}${String(wholeHours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function prokeralaLanguageCode(language = "English") {
+  const code = languageProfile(language).code;
+  return ["en", "hi", "ta", "te", "ml"].includes(code) ? code : "en";
+}
+
+function prokeralaAyanamsa(profile) {
+  if (astrologyProvider.ayanamsa) return astrologyProvider.ayanamsa;
+  const value = String(profile.ayanamsha || profile.ayanamsa || "Lahiri").toLowerCase();
+  if (value.includes("raman")) return "3";
+  if (value.includes("krishnamurti") || value.includes("kp")) return "5";
+  return "1";
+}
+
+function prokeralaBirthQuery(profile) {
+  const payload = providerBirthPayload(profile);
+  const date = `${String(payload.year).padStart(4, "0")}-${String(payload.month).padStart(2, "0")}-${String(payload.day).padStart(2, "0")}`;
+  const time = `${String(payload.hour).padStart(2, "0")}:${String(payload.min).padStart(2, "0")}:00`;
+  return {
+    ayanamsa: prokeralaAyanamsa(profile),
+    coordinates: `${payload.lat.toFixed(6)},${payload.lon.toFixed(6)}`,
+    datetime: `${date}T${time}${offsetLabelFromHours(payload.tzone)}`,
+    la: prokeralaLanguageCode(profile.language)
+  };
+}
+
+function sanitizedProviderPayload(profile) {
+  const payload = providerBirthPayload(profile);
+  if (astrologyProvider.kind === "prokerala") {
+    return prokeralaBirthQuery(profile);
+  }
+  return {
+    ...payload,
+    lat: Number(payload.lat.toFixed(4)),
+    lon: Number(payload.lon.toFixed(4))
+  };
+}
+
+function isAstrologyProviderConfigured() {
+  if (astrologyProvider.kind === "prokerala") {
+    return Boolean(astrologyProvider.clientId && astrologyProvider.clientSecret);
+  }
+  return Boolean(astrologyProvider.apiKey);
+}
+
+function publicProviderStatus() {
+  const configured = isAstrologyProviderConfigured();
+  const credentials = astrologyProvider.kind === "prokerala"
+    ? {
+        mode: "oauth-client-credentials",
+        clientType: astrologyProvider.clientType,
+        clientIdPresent: Boolean(astrologyProvider.clientId),
+        clientSecretPresent: Boolean(astrologyProvider.clientSecret),
+        serverSideOnly: true
+      }
+    : {
+        mode: "api-key",
+        apiKeyPresent: Boolean(astrologyProvider.apiKey),
+        serverSideOnly: true
+      };
+  return {
+    provider: astrologyProvider.name,
+    kind: astrologyProvider.kind,
+    configured,
+    baseUrl: astrologyProvider.baseUrl,
+    endpoints: astrologyProvider.endpoints,
+    credentials,
+    note: configured
+      ? "External astrology provider calls are enabled on the server."
+      : "External astrology credentials are not configured on the server, so Health Kundli uses the built-in fallback calculator."
+  };
+}
+
+function providerUrl(endpoint) {
+  return `${astrologyProvider.baseUrl.replace(/\/+$/, "")}/${String(endpoint).replace(/^\/+/, "")}`;
+}
+
+function compactErrorText(text) {
+  return String(text || "").replace(/\s+/g, " ").slice(0, 220);
+}
+
+async function getProkeralaAccessToken() {
+  const now = Date.now();
+  if (prokeralaTokenCache.accessToken && prokeralaTokenCache.expiresAt > now + 60000) {
+    return prokeralaTokenCache.accessToken;
+  }
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: astrologyProvider.clientId,
+    client_secret: astrologyProvider.clientSecret
+  });
+  const response = await fetch(astrologyProvider.tokenUrl, {
+    method: "POST",
+    headers: {
+      "accept": "application/json",
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body
+  });
+  if (!response.ok) {
+    throw new Error(`Prokerala token request returned ${response.status}: ${compactErrorText(await response.text())}`);
+  }
+  const payload = await response.json();
+  if (!payload.access_token) {
+    throw new Error("Prokerala token response did not include an access token.");
+  }
+  const expiresInSeconds = Number(payload.expires_in || 3600);
+  prokeralaTokenCache = {
+    accessToken: payload.access_token,
+    expiresAt: now + Math.max(60, expiresInSeconds - 60) * 1000
+  };
+  return prokeralaTokenCache.accessToken;
+}
+
+async function callProkeralaEndpoint(endpoint, profile, extraQuery = {}, responseType = "json") {
+  const token = await getProkeralaAccessToken();
+  const query = new URLSearchParams({ ...prokeralaBirthQuery(profile), ...extraQuery });
+  const response = await fetch(`${providerUrl(endpoint)}?${query.toString()}`, {
+    headers: {
+      "accept": responseType === "svg" ? "image/svg+xml" : "application/json",
+      "authorization": `Bearer ${token}`
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`${endpoint} returned ${response.status}: ${compactErrorText(await response.text())}`);
+  }
+  return responseType === "svg" ? response.text() : response.json();
+}
+
+async function settleProviderCall(label, callback) {
+  try {
+    return [label, { ok: true, value: await callback() }];
+  } catch (error) {
+    return [label, { ok: false, error: error.message }];
+  }
+}
+
+async function callLegacyAstrologyEndpoint(endpoint, payload) {
   if (!astrologyProvider.apiKey) return null;
   const response = await fetch(`${astrologyProvider.baseUrl}${endpoint}`, {
     method: "POST",
@@ -1649,28 +1844,82 @@ async function callAstrologyEndpoint(endpoint, payload) {
   return response.json();
 }
 
-async function fetchExternalAstrology(profile) {
+async function fetchProkeralaAstrology(profile) {
+  if (!isAstrologyProviderConfigured()) {
+    return {
+      configured: false,
+      name: astrologyProvider.name,
+      kind: astrologyProvider.kind,
+      source: "local-fallback",
+      message: "Using the built-in Kundli calculator while the Prokerala server credentials are being configured.",
+      setupRequired: true,
+      credentialMode: "oauth-client-credentials",
+      requestedPayload: sanitizedProviderPayload(profile)
+    };
+  }
+
+  const calls = await Promise.all([
+    settleProviderCall("kundli", () => callProkeralaEndpoint(astrologyProvider.endpoints.kundli, profile)),
+    settleProviderCall("advancedKundli", () => callProkeralaEndpoint(astrologyProvider.endpoints.advancedKundli, profile)),
+    settleProviderCall("birthChartSvg", () => callProkeralaEndpoint(astrologyProvider.endpoints.birthChart, profile, {
+      chart_type: "rasi",
+      chart_style: "north-indian",
+      format: "svg"
+    }, "svg")),
+    settleProviderCall("planetPositions", () => callProkeralaEndpoint(astrologyProvider.endpoints.planetPositions, profile)),
+    settleProviderCall("mahaDasha", () => callProkeralaEndpoint(astrologyProvider.endpoints.mahaDasha, profile)),
+    settleProviderCall("sadeSati", () => callProkeralaEndpoint(astrologyProvider.endpoints.sadeSati, profile)),
+    settleProviderCall("mangalDosha", () => callProkeralaEndpoint(astrologyProvider.endpoints.mangalDosha, profile))
+  ]);
+  const providerData = {};
+  const endpointErrors = [];
+  for (const [label, result] of calls) {
+    if (result.ok) providerData[label] = result.value;
+    else endpointErrors.push({ endpoint: label, error: result.error });
+  }
+  if (!Object.keys(providerData).length) {
+    throw new Error(endpointErrors[0]?.error || "No Prokerala endpoints returned data.");
+  }
+  return {
+    configured: true,
+    name: astrologyProvider.name,
+    kind: astrologyProvider.kind,
+    source: endpointErrors.length ? "prokerala-api-partial" : "prokerala-api",
+    credentialMode: "oauth-client-credentials",
+    endpoints: astrologyProvider.endpoints,
+    requestedPayload: sanitizedProviderPayload(profile),
+    ...providerData,
+    diagnostics: endpointErrors.length ? { endpointErrors } : undefined,
+    message: endpointErrors.length
+      ? "Prokerala returned partial Kundli data; the built-in health view filled the remaining gaps."
+      : "Prokerala Kundli data connected. Health analysis is normalized for Jyotish Arogya."
+  };
+}
+
+async function fetchLegacyKundliAstrology(profile) {
   const payload = providerBirthPayload(profile);
   if (!astrologyProvider.apiKey) {
     return {
       configured: false,
       name: astrologyProvider.name,
+      kind: astrologyProvider.kind,
       source: "local-fallback",
       message: "Using the built-in Kundli calculator while the external astrology provider connection is pending.",
       setupRequired: true,
-      requestedPayload: { ...payload, lat: Number(payload.lat.toFixed(4)), lon: Number(payload.lon.toFixed(4)) }
+      requestedPayload: sanitizedProviderPayload(profile)
     };
   }
   try {
     const [lagnaChart, planetPositions, mahaDasha, sadeSati] = await Promise.all([
-      callAstrologyEndpoint(astrologyProvider.endpoints.lagnaChart, payload),
-      callAstrologyEndpoint(astrologyProvider.endpoints.planetPositions, payload),
-      callAstrologyEndpoint(astrologyProvider.endpoints.mahaDasha, payload),
-      callAstrologyEndpoint(astrologyProvider.endpoints.sadeSati, payload)
+      callLegacyAstrologyEndpoint(astrologyProvider.endpoints.lagnaChart, payload),
+      callLegacyAstrologyEndpoint(astrologyProvider.endpoints.planetPositions, payload),
+      callLegacyAstrologyEndpoint(astrologyProvider.endpoints.mahaDasha, payload),
+      callLegacyAstrologyEndpoint(astrologyProvider.endpoints.sadeSati, payload)
     ]);
     return {
       configured: true,
       name: astrologyProvider.name,
+      kind: astrologyProvider.kind,
       source: "external-api",
       endpoints: astrologyProvider.endpoints,
       lagnaChart,
@@ -1682,6 +1931,7 @@ async function fetchExternalAstrology(profile) {
     return {
       configured: true,
       name: astrologyProvider.name,
+      kind: astrologyProvider.kind,
       source: "external-api-error-fallback",
       message: "External Kundli provider could not be reached, so the built-in Kundli calculator was used.",
       diagnostics: {
@@ -1691,7 +1941,27 @@ async function fetchExternalAstrology(profile) {
   }
 }
 
-function localHealthChart(profile) {
+async function fetchExternalAstrology(profile) {
+  try {
+    return astrologyProvider.kind === "prokerala"
+      ? await fetchProkeralaAstrology(profile)
+      : await fetchLegacyKundliAstrology(profile);
+  } catch (error) {
+    return {
+      configured: isAstrologyProviderConfigured(),
+      name: astrologyProvider.name,
+      kind: astrologyProvider.kind,
+      source: "external-api-error-fallback",
+      message: "External Kundli provider could not be reached, so the built-in Kundli calculator was used.",
+      requestedPayload: sanitizedProviderPayload(profile),
+      diagnostics: {
+        error: error.message
+      }
+    };
+  }
+}
+
+function localHealthChart(profile, provider) {
   const chartId = kundliChartId(profile);
   const calculatedLagna = derivedSign(profile, "lagna");
   const calculatedMoonSign = derivedSign(profile, "moon");
@@ -1705,7 +1975,9 @@ function localHealthChart(profile) {
     style: "North Indian D1 health view",
     chartId,
     calculatedFrom: ["birthDate", "birthTime", "birthPlace", "timezone", "ayanamsha"],
-    calculationMode: astrologyProvider.apiKey ? "provider-fallback-normalized" : "local-birth-fingerprint-fallback",
+    calculationMode: provider?.source?.startsWith("prokerala-api")
+      ? "prokerala-api-health-normalized"
+      : (isAstrologyProviderConfigured() ? "provider-fallback-normalized" : "local-birth-fingerprint-fallback"),
     ayanamsha: profile.ayanamsha,
     lagna: calculatedLagna,
     profileLagna: profile.lagna,
@@ -1751,9 +2023,38 @@ const houseHealthFocus = {
   12: "sleep, feet, hospitalization indicators"
 };
 
-function analyzeHealthKundli(profile, chart, dashboard) {
+function healthSignalsFromProvider(provider = {}) {
+  const kundliData = provider.kundli?.data || provider.advancedKundli?.data || {};
+  const nakshatraDetails = kundliData.nakshatra_details || {};
+  const currentDasha = provider.mahaDasha?.data?.dasha_periods?.[0] || null;
+  const signals = {
+    source: provider.source || "local-fallback",
+    nakshatra: nakshatraDetails.nakshatra?.name || null,
+    chandraRasi: nakshatraDetails.chandra_rasi?.name || null,
+    sooryaRasi: nakshatraDetails.soorya_rasi?.name || null,
+    zodiac: kundliData.zodiac?.name || null,
+    dasha: currentDasha ? {
+      name: currentDasha.name,
+      start: currentDasha.start,
+      end: currentDasha.end
+    } : null,
+    sadeSati: provider.sadeSati?.data ? {
+      active: provider.sadeSati.data.is_in_sade_sati,
+      phase: provider.sadeSati.data.transit_phase,
+      description: provider.sadeSati.data.description
+    } : null,
+    mangalDosha: provider.mangalDosha?.data ? {
+      active: provider.mangalDosha.data.has_dosha,
+      description: provider.mangalDosha.data.description
+    } : null
+  };
+  return Object.fromEntries(Object.entries(signals).filter(([, value]) => value !== null && value !== undefined));
+}
+
+function analyzeHealthKundli(profile, chart, dashboard, provider = {}) {
   const trikaHouses = chart.houses.filter((item) => [6, 8, 12].includes(item.house));
   const activeTrika = trikaHouses.filter((item) => item.planets.length);
+  const providerSignals = healthSignalsFromProvider(provider);
   const healthHighlights = activeTrika.map((item) => ({
     house: item.house,
     sign: item.sign,
@@ -1790,7 +2091,10 @@ function analyzeHealthKundli(profile, chart, dashboard) {
       "Protect Saturn areas with warm mobility, posture care and consistent sleep timing.",
       "Treat this as wellness intelligence only; seek qualified medical care for symptoms or urgent concerns."
     ],
-    confidence: dashboard.profileContract.encryptedBirthData.stored ? "profile-complete" : "profile-needs-review"
+    providerSignals,
+    confidence: provider?.source?.startsWith("prokerala-api")
+      ? "provider-connected"
+      : (dashboard.profileContract.encryptedBirthData.stored ? "profile-complete" : "profile-needs-review")
   };
 }
 
@@ -1803,6 +2107,10 @@ function healthInterpretationForHouse(house, planets) {
 }
 
 function renderHealthKundliSvg(payload) {
+  const providerSvg = String(payload.provider?.birthChartSvg || "").trim();
+  if (providerSvg.includes("<svg") && !/<script/i.test(providerSvg)) {
+    return providerSvg;
+  }
   const width = 980;
   const height = 820;
   const houses = payload.chart.houses;
@@ -1887,8 +2195,8 @@ async function buildHealthKundli(userId = "demo", req) {
   const dashboard = buildDashboard(userId);
   const profile = dashboard.profile;
   const provider = await fetchExternalAstrology(profile);
-  const chart = localizeHealthChart(localHealthChart(profile), profile.language);
-  const analysis = analyzeHealthKundli(profile, chart, dashboard);
+  const chart = localizeHealthChart(localHealthChart(profile, provider), profile.language);
+  const analysis = analyzeHealthKundli(profile, chart, dashboard, provider);
   const origin = requestOrigin(req);
   return {
     schemaVersion: contractVersions.healthKundli,
@@ -2453,12 +2761,7 @@ function apiConfig(language = "English") {
     safetyPolicyVersion: safetyPolicy.version,
     contractVersions,
     onboarding: onboardingOptions,
-    astrologyProvider: {
-      name: astrologyProvider.name,
-      configured: Boolean(astrologyProvider.apiKey),
-      baseUrl: astrologyProvider.baseUrl,
-      endpoints: astrologyProvider.endpoints
-    }
+    astrologyProvider: publicProviderStatus()
   };
 }
 
@@ -2504,13 +2807,7 @@ async function handleApi(req, res, url) {
   if (method === "GET" && path === "/api/schemas") return json(res, 200, { versions: contractVersions, schemas: responseSchemas });
   if (method === "GET" && path === "/api/onboarding/options") return json(res, 200, { options: onboardingOptions, privacy: profileEnvelope("demo").privacy });
   if (method === "GET" && path === "/api/provider/status") {
-    return json(res, 200, {
-      provider: astrologyProvider.name,
-      configured: Boolean(astrologyProvider.apiKey),
-      baseUrl: astrologyProvider.baseUrl,
-      endpoints: astrologyProvider.endpoints,
-      note: astrologyProvider.apiKey ? "External provider calls are enabled." : "No API key found. Health Kundli uses local fallback until KUNDLI_API_KEY is set."
-    });
+    return json(res, 200, publicProviderStatus());
   }
   if (method === "GET" && path === "/api/health-kundli") return json(res, 200, await buildHealthKundli(userId, req));
   if (method === "GET" && path === "/api/health-kundli.svg") return svg(res, 200, renderHealthKundliSvg(await buildHealthKundli(userId, req)));

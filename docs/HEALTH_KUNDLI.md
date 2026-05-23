@@ -4,20 +4,21 @@ This feature creates a health-focused Kundli image and a plain-language health a
 
 ## Provider Adapter
 
-The server has a provider adapter for an external KundliAPI-compatible astrology API.
+The server has a provider adapter for Prokerala's Astrology API. Authentication uses OAuth client credentials on the server, then calls Prokerala's Kundli, chart, planet-position, dasha, Sade Sati, and Mangal Dosha endpoints.
 
 Environment variables:
 
 ```bash
-KUNDLI_API_KEY=...
-KUNDLI_API_BASE_URL=https://kundliapi.com
-KUNDLI_LAGNA_CHART_ENDPOINT=/api/charts/lagna_chart
-KUNDLI_PLANETS_ENDPOINT=/api/planets/all
-KUNDLI_DASHA_ENDPOINT=/api/dasha/maha_dasha
-KUNDLI_SADHESATI_ENDPOINT=/api/dosha/sadhesati
+ASTROLOGY_PROVIDER=Prokerala
+PROKERALA_CLIENT_ID=...
+PROKERALA_CLIENT_SECRET=...
+PROKERALA_CLIENT_TYPE=Web Application
+PROKERALA_API_BASE_URL=https://api.prokerala.com/v2
+PROKERALA_TOKEN_URL=https://api.prokerala.com/token
+PROKERALA_AYANAMSA=1
 ```
 
-If `KUNDLI_API_KEY` is missing, the API returns a local deterministic fallback chart and marks the provider source as `local-fallback`.
+If Prokerala credentials are missing or the provider cannot be reached, the API returns a local deterministic fallback chart and marks the provider source as `local-fallback` or `external-api-error-fallback`. The client secret is never returned by the API or embedded app.
 
 ## Endpoints
 

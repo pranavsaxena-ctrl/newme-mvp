@@ -13,6 +13,29 @@ function escapeHTML(value) {
   })[char]);
 }
 
+function renderProviderSignals(signals = {}) {
+  const rows = [
+    ["Source", signals.source],
+    ["Nakshatra", signals.nakshatra],
+    ["Moon rasi", signals.chandraRasi],
+    ["Sun rasi", signals.sooryaRasi],
+    ["Dasha", signals.dasha?.name],
+    ["Sade Sati", signals.sadeSati?.description || signals.sadeSati?.phase],
+    ["Mangal Dosha", signals.mangalDosha?.description]
+  ].filter(([, value]) => value);
+  if (!rows.length) return "";
+  return `
+    <div class="provider-signal-grid" aria-label="External Kundli signals">
+      ${rows.map(([label, value]) => `
+        <div>
+          <span>${escapeHTML(label)}</span>
+          <strong>${escapeHTML(value)}</strong>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 async function loadHealthKundli() {
   const query = new URLSearchParams({ userId });
   if (requestedChartId) query.set("chartId", requestedChartId);
@@ -60,6 +83,7 @@ async function loadHealthKundli() {
             </div>
             <img class="kundli-preview" src="${escapeHTML(payload.svgUrl)}" alt="Health Kundli chart">
           </div>
+          ${renderProviderSignals(payload.analysis.providerSignals)}
           <div class="safety-band">${escapeHTML(payload.provider.message || "External provider returned chart data.")}</div>
         </div>
       </section>
